@@ -1,0 +1,84 @@
+---
+title: "Tidytext narrative arcs"
+author: "Martine Wauben"
+date: "6 October 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tidytext)
+library(gutenbergr)
+library(stringr)
+library(ggplot2)
+```
+
+## R Markdown
+
+First, we choose books to download from the Gutenberg archives using the gutenbergr package. We load them using their book ID, adding the author's name, book title, line number, and chapter number. 
+
+```{r load data}
+dickens_curiosity <- gutenberg_download(700) %>%
+  mutate(author = "Charles Dickens",
+         title = "The Old Curiosity Shop",
+         linenumber = row_number(), 
+         chapter = cumsum(str_detect(text, regex("^chapter [\\divxlc]", ignore_case = TRUE))))
+dickens_expectations <- gutenberg_download(1400) %>%
+  mutate(author = "Charles Dickens",
+         title = "Great Expectations",
+         linenumber = row_number(), 
+         chapter = cumsum(str_detect(text, regex("^chapter [\\divxlc]", ignore_case = TRUE))))
+bronte_eyre <- gutenberg_download(1260)%>%
+  mutate(author = "Bronte",
+         title = "Jane Eyre",
+         linenumber = row_number(), 
+         chapter = cumsum(str_detect(text, regex("^chapter [\\divxlc]", ignore_case = TRUE))))
+wilde_earnest <- gutenberg_download(844)%>%
+  mutate(author = "Oscar Wilde",
+         title = "The Importance of Being Earnest",
+         linenumber = row_number(), 
+         chapter = cumsum(str_detect(text, regex("^chapter [\\divxlc]", ignore_case = TRUE))))
+doyle_sherlock <- gutenberg_download(1661) %>%
+  mutate(author = "Arthur Conan Doyle",
+         title = "Sherlock Holmes",
+         linenumber = row_number(), 
+         chapter = cumsum(str_detect(text, regex("^chapter [\\divxlc]", ignore_case = TRUE))))
+shakespeare_shrew <- gutenberg_download(1107)%>%
+  mutate(author = "William Shakespeare",
+         title = "The Taming of the Shrew",
+         linenumber = row_number(), 
+         chapter = cumsum(str_detect(text, regex("^chapter [\\divxlc]", ignore_case = TRUE))))
+```
+
+Then, we combine all these dataframes into one and tidy the data. We also remove any stopwords, like "and", "of" and "the", which don't tell us much about the mood of the text.
+
+```{r tidy}
+all_data <- do.call("rbind", list(dickens_curiosity, dickens_expectations, bronte_eyre, wilde_earnest, doyle_sherlock, shakespeare_shrew))
+
+tidied_data <- all_data %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words)
+```
+
+Now, we can add the sentiment scores. We use the AFINN sentiment score library, which rates words from -5 to 5 in accordance with how negative or positive they are, respectively.
+
+We then summarise the overall sentiment for each 80 lines. 
+
+```{r join sentiment scores}
+all_sentiments <- tidied_data %>%
+  inner_join(get_sentiments("afinn"), by = "word") %>%  
+  group_by(title, index = linenumber %/% 80) %>% 
+  summarise(sentiment = sum(score)) %>% 
+  mutate(method = "AFINN")
+```
+
+Now, we can visualise the sentiment for each 80 lines. Note that the length of the different volumes means that the X scales are not identical for each book.
+
+```{r visualise sentiment over lines}
+ggplot(all_sentiments, aes(x = index, y = sentiment, fill = title))+
+  geom_col()+
+  facet_wrap(~title, scales = "free_x")+ 
+  guides(fill=FALSE)
+```
+
