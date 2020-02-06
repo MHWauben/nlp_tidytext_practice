@@ -1,5 +1,5 @@
 ---
-title: "R Notebook"
+title: "Re-training GloVE embeddings"
 output:
   html_document:
     df_print: paged

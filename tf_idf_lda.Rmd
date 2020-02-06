@@ -1,0 +1,78 @@
+---
+title: "TF-IDF and LDA"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup}
+library(gutenbergr)
+library(stringr)
+library(tidytext)
+library(tidyr)
+library(magrittr)
+library(dplyr)
+library(ggplot2)
+library(topicmodels)
+
+
+clean_str <- function(vec){
+  cleaned_vec <- gsub(" {2,}", " ", 
+                      gsub("[^a-z0-9-]", " ", 
+                           gsub("(\\\\)|(/)", "-", tolower(vec))))
+}
+
+source('tf_idf_lda_functions.R')
+```
+
+Use GloVE to compare topics between Sherlock Holmes and Shakespeare's Taming of the Shrew. 
+
+```{r import data}
+doyle_sherlock <- gutenberg_download(1661) %>%
+  mutate(author = "Arthur Conan Doyle",
+         title = "Sherlock Holmes",
+         linenumber = row_number(), 
+         chapter = cumsum(str_detect(text, regex("^chapter [\\divxlc]", ignore_case = TRUE))))
+shakespeare_shrew <- gutenberg_download(1107)%>%
+  mutate(author = "William Shakespeare",
+         title = "The Taming of the Shrew",
+         linenumber = row_number(), 
+         chapter = cumsum(str_detect(text, regex("^chapter [\\divxlc]", ignore_case = TRUE))))
+
+data <- rbind(doyle_sherlock, shakespeare_shrew)
+```
+
+```{r pre-clean data}
+data_cl <- data %>%
+  mutate(text = clean_str(text)) %>%
+  tidytext::unnest_tokens(word, text, token = "words") %>%
+  dplyr::anti_join(tidytext::get_stopwords(), by = "word") %>% # Remove stop-words
+  dplyr::filter(!grepl("^[0-9]{1,}$", word)) %>% # Get rid of number-only 'words'
+  dplyr::filter(!grepl("^[vxi]+$", word)) %>% # Get rid of roman numerals
+  dplyr::mutate(word = hunspell::hunspell_stem(word)) %>% # Stem words to group better
+  tidyr::unnest(word)
+
+cat(sprintf('Found %s unique tokens.\n', length(unique(data_cl$word))))
+```
+
+# TF IDF value 
+
+```{r tf idf visualisation}
+vis_tf_idf(tf_idf_out(data_cl, author), author)
+```
+
+# LDA topic clustering
+
+```{r LDA visualisation}
+auth_lda <- full_LDA(data_cl, grouping_var = author, k = 4, n = 20)
+auth_lda$vis$full
+```
+
+```{r visualise difference between topics}
+auth_lda$vis$beta
+```
+
+```{r visualise topic distribution across cases}
+auth_lda$vis$gamma
+```
+
