@@ -1,0 +1,211 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Using pre-trained GloVE embeddings. 
+
+This was an experiment and does work consistently.
+The pre-trained GloVe loadings and text2vec embedding work
+This produces loads of features, which are reduced with PCA
+The glm at the end works with a subset of principal components, but is not particularly accurate...
+
+```{r setup}
+library(gutenbergr)
+library(stringr)
+library(tidytext)
+library(tidyr)
+library(magrittr)
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(text2vec)
+library(boot)
+library(nnet)
+
+
+clean_str <- function(vec){
+  cleaned_vec <- gsub(" {2,}", " ", 
+                      gsub("[^a-z0-9-]", " ", 
+                           gsub("(\\\\)|(/)", "-", tolower(vec))))
+}
+
+
+cat_to_predict <- "author"
+grouping_cols <- c("author", "title", "linenumber", "chapter")
+```
+
+Use GloVE to compare topics between Sherlock Holmes and Shakespeare's Taming of the Shrew. 
+
+```{r import data}
+doyle_sherlock <- gutenberg_download(1661) %>%
+  mutate(author = "Arthur Conan Doyle",
+         title = "Sherlock Holmes",
+         linenumber = row_number(), 
+         chapter = cumsum(str_detect(text, regex("^chapter [\\divxlc]", ignore_case = TRUE))))
+shakespeare_shrew <- gutenberg_download(1107)%>%
+  mutate(author = "William Shakespeare",
+         title = "The Taming of the Shrew",
+         linenumber = row_number(), 
+         chapter = cumsum(str_detect(text, regex("^chapter [\\divxlc]", ignore_case = TRUE))))
+
+data <- rbind(doyle_sherlock, shakespeare_shrew)
+```
+
+```{r pre-clean data}
+data_cl <- data %>%
+  mutate(text = clean_str(text)) %>%
+  tidytext::unnest_tokens(word, text, token = "words") %>%
+  dplyr::anti_join(tidytext::get_stopwords(), by = "word") %>% # Remove stop-words
+  dplyr::filter(!grepl("^[0-9]{1,}$", word)) %>% # Get rid of number-only 'words'
+  dplyr::filter(!grepl("^[vxi]+$", word)) %>% # Get rid of roman numerals
+  dplyr::mutate(word = hunspell::hunspell_stem(word)) %>% # Stem words to group better
+  tidyr::unnest(word)
+
+cat(sprintf('Found %s unique tokens.\n', length(unique(data_cl$word))))
+```
+
+# Using GloVe
+
+```{r download GloVe}
+## Use out-of-the-box GloVe embeddings ----
+GLOVE_DIR <- 'glove.6B'
+num_embedding_vectors <- 300 # One of 50, 100, 200, or 300
+
+# download data (if not already in the workspace; takes quite a while)
+download_data <- function(data_dir, url_path, data_file) {
+  if (!dir.exists(data_dir)) {
+    download.file(paste0(url_path, data_file), data_file, mode = "wb")
+    if (tools::file_ext(data_file) == "zip")
+      unzip(data_file, exdir = tools::file_path_sans_ext(data_file))
+    else
+      untar(data_file)
+    unlink(data_file)
+  }
+}
+download_data(GLOVE_DIR, 'http://nlp.stanford.edu/data/', 'glove.6B.zip')
+```
+
+```{r extract GloVE embeddings}
+# extract embedding vectors
+embed_names <- paste0("pre-embed_", seq(1, num_embedding_vectors))
+lines <- data.frame(lines = readLines(file.path(GLOVE_DIR, paste0('glove.6B.', num_embedding_vectors, 'd.txt')))) %>%
+  tidyr::separate(lines, c("word", embed_names), ' ')
+lines[, embed_names] <- lapply(lines[, embed_names], as.double)
+
+cat(sprintf('Found %s GloVE word vectors.\n', ncol(lines)-1))
+```
+
+```{r prepare text2vec}
+# Use text2vec to train GloVe ----
+# http://text2vec.org/glove.html
+# Create iterator over tokens
+tokens <- text2vec::space_tokenizer(data$text)
+# Create vocabulary. Terms will be unigrams (simple words).
+it <- text2vec::itoken(tokens, progressbar = FALSE)
+vocab <- text2vec::create_vocabulary(it)
+# Only keep words that appear at least 5 times
+vocab <- text2vec::prune_vocabulary(vocab, term_count_min = 5L)
+
+# Use our filtered vocabulary
+vectorizer <- text2vec::vocab_vectorizer(vocab)
+# use window of 5 for context words
+tcm <- text2vec::create_tcm(it, vectorizer, skip_grams_window = 5L)
+```
+
+```{r retrain glove}
+# Train new vectors
+glove <- GlobalVectors$new(word_vectors_size = num_embedding_vectors, 
+                           vocabulary = vocab, x_max = 10)
+wv_main <- glove$fit_transform(tcm, n_iter = 10, convergence_tol = 0.01)
+wv_context <- glove$components
+word_vectors <- as.data.frame(wv_main + t(wv_context))
+cat(sprintf('Trained %s GloVE word vectors.\n', ncol(word_vectors)))
+
+trained_names <- paste0("trained_", seq(1, num_embedding_vectors))
+colnames(word_vectors) <- trained_names
+word_vectors[, 'word'] <- rownames(word_vectors)
+```
+
+```{r add glove to data}
+# Add pre-trained GloVe embeddings to data ----
+# not removing duplicate words per incident
+# https://stats.stackexchange.com/questions/401366/text-embeddings-on-a-small-dataset
+inc_embed <- merge(data.table::setDT(data_cl), data.table::setDT(lines), 
+                   by = "word", all.x = F, all.y = F) %>%
+  dplyr::group_by_at(c("gutenberg_id", grouping_cols)) %>%
+  dplyr::summarise_at(embed_names, mean) %>%
+  dplyr::ungroup()
+
+inc_embed_tr <- merge(data.table::setDT(data_cl), data.table::setDT(word_vectors), 
+                   by = "word", all.x = F, all.y = F) %>%
+  dplyr::group_by_at(c("gutenberg_id", grouping_cols)) %>%
+  dplyr::summarise_at(trained_names, mean) %>%
+  dplyr::ungroup() 
+inc_embed_tot <- merge(data.table::setDT(inc_embed), data.table::setDT(inc_embed_tr),
+                       by = c("gutenberg_id", grouping_cols))
+inc_embed_tot[,(grouping_cols):= lapply(.SD, as.factor), .SDcols = grouping_cols]
+
+inc_embed_fin <- as.data.frame(inc_embed_tot)
+```
+
+## Reduce dimensionality
+
+```{r PCA}
+pca <- prcomp(inc_embed_fin[grepl("pre-embed", colnames(inc_embed_fin)) | 
+                              grepl("trained", colnames(inc_embed_fin))], 
+              scale = TRUE)
+pca_vals <- pca$x[, 1:100]
+# Create PCA'd dataset (replacing original embeddings with this)
+inc_embed_pca <- cbind(inc_embed_fin[!(grepl("pre-embed", colnames(inc_embed_fin)) | 
+                                         grepl("trained", colnames(inc_embed_fin)))],
+                       pca_vals)
+```
+
+# Model training
+
+```{r model split & sample}
+# split the data into a training set and a validation set
+pc_names <- colnames(inc_embed_pca)[grepl("PC", colnames(inc_embed_pca))]
+all_data <- inc_embed_pca %>%
+  dplyr::select(c(cat_to_predict, pc_names))
+indices <- sample(1:nrow(all_data), 
+                  size = 0.8*nrow(all_data))
+train <- all_data[indices, ]
+# Oversample to equalise groups
+num_largest <- max(table(train[, cat_to_predict]))
+train_bal <- train %>%
+  dplyr::group_by_at(cat_to_predict) %>%
+  dplyr::sample_n(., num_largest, replace = T)
+test <- all_data[-indices, ]
+```
+
+```{r model setup}
+pretrained_form <- as.formula(paste0(cat_to_predict, "~", 
+                               paste0(pc_names, collapse = "+")))
+
+gen_lm <- stats::glm(pretrained_form, family = binomial, train_bal)
+cv_glm <- boot::cv.glm(train_bal, gen_lm, K = 10)
+summary(gen_lm)
+cv_glm$delta
+# Correct classification = 1 - delta
+```
+
+```{r visualise distinction between groups}
+test[, "gen_lm"] <- predict(gen_lm, test)
+ggplot2::ggplot(test, aes_string(y = "gen_lm", x = cat_to_predict))+
+  geom_violin()
+```
+
+```{r if more than two levels: multinomial}
+if (length(levels(dplyr::pull(train_bal, cat_to_predict))) > 2){
+  multi_lm <- nnet::multinom(pretrained_form, train_bal)
+  test[, "multi_lm"] <- predict(multi_lm, test)
+  ggplot2::ggplot(test, aes_string(y = "multi_lm", x = cat_to_predict))+
+    geom_bin2d()
+}
+```
+
+
