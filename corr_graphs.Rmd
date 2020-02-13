@@ -1,0 +1,130 @@
+---
+title: "Graphs and correlations"
+author: "Martine Wauben"
+date: "13/02/2020"
+output: html_document
+---
+
+
+```{r setup}
+library(gutenbergr)
+library(stringr)
+library(tidytext)
+library(tidyr)
+library(magrittr)
+library(dplyr)
+library(ggplot2)
+library(igraph)
+library(ggraph)
+library(widyr)
+
+
+clean_str <- function(vec){
+  cleaned_vec <- gsub(" {2,}", " ", 
+                      gsub("[^a-z0-9-]", " ", 
+                           gsub("(\\\\)|(/)", "-", tolower(vec))))
+}
+```
+
+Use pairwise correlations and graph network visualisations to show clusters of words. 
+
+```{r import data}
+doyle_sherlock <- gutenberg_download(1661) %>%
+  mutate(author = "Arthur Conan Doyle",
+         title = "Sherlock Holmes",
+         linenumber = row_number(), 
+         chapter = cumsum(str_detect(text, regex("^chapter [\\divxlc]", ignore_case = TRUE))))
+shakespeare_shrew <- gutenberg_download(1107)%>%
+  mutate(author = "William Shakespeare",
+         title = "The Taming of the Shrew",
+         linenumber = row_number(), 
+         chapter = cumsum(str_detect(text, regex("^chapter [\\divxlc]", ignore_case = TRUE))))
+
+data <- rbind(doyle_sherlock, shakespeare_shrew)
+```
+
+```{r pre-clean data}
+data_cl <- data %>%
+  mutate(text = clean_str(text)) %>%
+  tidytext::unnest_tokens(word, text, token = "words") %>%
+  dplyr::anti_join(tidytext::get_stopwords(), by = "word") %>% # Remove stop-words
+  dplyr::filter(!grepl("^[0-9]{1,}$", word)) %>% # Get rid of number-only 'words'
+  dplyr::filter(!grepl("^[vxi]+$", word)) %>% # Get rid of roman numerals
+  dplyr::mutate(word = hunspell::hunspell_stem(word)) %>% # Stem words to group better
+  tidyr::unnest(word)
+
+cat(sprintf('Found %s unique tokens.\n', length(unique(data_cl$word))))
+```
+
+```{r create bigram data}
+# Turn text into bigrams (pairs of words)
+data_cl_bigrams <- data %>%
+  mutate(text = clean_str(text)) %>%
+  tidytext::unnest_tokens(word, text, token = "ngrams", n = 2) %>%
+  tidyr::separate(word, c("word1", "word2")) %>%
+  dplyr::anti_join(get_stopwords(), by = c("word1" = "word")) %>% # Remove stop-words
+  dplyr::anti_join(get_stopwords(), by = c("word2" = "word")) %>% 
+  dplyr::filter(!(is.na(word1) | is.na(word2))) %>%
+  dplyr::filter(!(grepl("^[0-9]{1,}$", word1) | grepl("^[0-9]{1,}$", word2))) %>% # Get rid of number-only 'words'
+  dplyr::filter(!(grepl("^[vxi]+$", word1) | grepl("^[vxi]+$", word2))) %>% # Get rid of roman numerals
+  tidyr::unite(word, word1, word2, sep = " ")
+```
+
+
+```{r word clusters}
+# Are there natural clusters of words? ----
+network_bigrams <- data_cl_bigrams %>%
+  dplyr::filter(!grepl("[0-9]{2,}", word)) %>%
+  dplyr::group_by(word) %>%
+  dplyr::summarise(count = n()) %>%
+  tidyr::separate(word, c("word1", "word2"))%>%
+  dplyr::filter(count > 10) %>% # Filter combinations of words that occur quite often
+  igraph::graph_from_data_frame()
+
+ggraph(network_bigrams, layout = "graphopt") +
+  geom_edge_link(arrow = arrow(length = unit(2, 'mm')), 
+                 end_cap = circle(1, 'mm')) + 
+  geom_node_point(color = "lightblue", size = 2) +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+
+```{r correlations}
+word_corr <- data_cl %>%
+  dplyr::group_by(word) %>%
+  dplyr::filter(n() >= 30) %>%
+  widyr::pairwise_cor(word, gutenberg_id, sort = TRUE)
+
+word_corr %>%
+  dplyr::filter(correlation > .7) %>%
+  igraph::graph_from_data_frame() %>%
+  ggraph(layout = "graphopt") +
+  geom_edge_link(aes(edge_alpha = correlation), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 3, alpha = 0.5) +
+  geom_node_text(aes(label = name), repel = TRUE) +
+  theme_void()
+```
+
+```{r grouped within one group only}
+shakespeare_bigrams <- data_cl_bigrams %>%
+  dplyr::filter(gutenberg_id == 1107 & linenumber > 225 & linenumber < 3427) %>% # Only Shakespeare (remove legal text)
+  tidyr::separate(word, into = c("word1", "word2")) %>%
+  dplyr::select(linenumber, word1, word2) %>%
+  tidyr::gather("order", "word", -linenumber) %>%
+  dplyr::group_by(word) %>%
+  dplyr::filter(n() >= 10) %>%
+  widyr::pairwise_cor(word, linenumber, sort = TRUE)
+
+shakespeare_bigrams %>%
+  dplyr::filter(correlation > .1) %>%
+  igraph::graph_from_data_frame() %>%
+  ggraph(layout = "graphopt") +
+  geom_edge_link(aes(edge_alpha = correlation), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 3, alpha = 0.5) +
+  geom_node_text(aes(label = name), repel = TRUE) +
+  theme_void()
+```
+
+
+
